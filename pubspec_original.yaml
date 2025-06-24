@@ -1,0 +1,120 @@
+name: amore
+description: "Amore - 深度連結的約會應用程式，專為香港市場設計"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.1.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  
+  # UI 和動畫
+  cupertino_icons: ^1.0.8
+  flutter_svg: ^2.0.10
+  lottie: ^3.1.0
+  shimmer: ^3.0.0
+  flutter_staggered_animations: ^1.1.1
+  
+  # 狀態管理
+  flutter_riverpod: ^2.5.1
+  
+  # 路由 - 使用兼容版本
+  go_router: ^12.1.3
+  
+  # Firebase 服務 - 使用與Flutter 3.32.1兼容的版本
+  firebase_core: ^2.24.2
+  firebase_auth: ^4.15.3
+  cloud_firestore: ^4.13.6
+  firebase_storage: ^11.5.6
+  firebase_messaging: ^14.7.10
+  firebase_analytics: ^10.7.4
+  firebase_crashlytics: ^3.4.8
+  firebase_app_check: ^0.2.1+8
+  
+  # 網絡和 API
+  dio: ^5.4.0
+  retrofit: ^4.1.0
+  json_annotation: ^4.8.1
+  
+  # 本地存儲
+  shared_preferences: ^2.2.2
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  
+  # 安全存儲 - 明確添加並指定Windows兼容版本
+  flutter_secure_storage: ^9.2.2
+  
+  # 圖片處理
+  image_picker: ^1.0.7
+  cached_network_image: ^3.3.1
+  image_cropper: ^5.0.1
+  flutter_image_compress: ^2.1.0
+  image: ^4.1.7
+  
+  # 地理位置
+  geolocator: ^10.1.0
+  geocoding: ^2.1.1
+  
+  # 視頻通話
+  # agora_rtc_engine: ^6.3.0
+  permission_handler: ^11.2.0
+  
+  # 音頻處理
+  just_audio: ^0.9.37
+  audio_waveforms: ^1.0.5
+  
+  # 工具類
+  intl: ^0.20.2
+  uuid: ^4.3.3
+  url_launcher: ^6.2.4
+  package_info_plus: ^5.0.1
+  device_info_plus: ^9.1.2
+  path: ^1.9.0
+  
+  # 支付
+  in_app_purchase: ^3.1.13
+  
+  # 社交媒體整合 - 使用Windows兼容版本
+  flutter_facebook_auth: ^6.0.4
+  google_sign_in: ^6.2.1
+  
+  # 其他
+  flutter_local_notifications: ^16.3.2
+  path_provider: ^2.1.2
+  connectivity_plus: ^5.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.2
+  
+  # 代碼生成
+  build_runner: ^2.4.7
+  json_serializable: ^6.7.1
+  retrofit_generator: ^8.1.0
+  hive_generator: ^2.0.1
+
+flutter:
+  uses-material-design: true
+  
+  # 資產配置
+  assets:
+    - assets/images/
+    - assets/icons/
+    - assets/animations/
+    - assets/audio/
+    - assets/fonts/
+  
+  # 字體配置
+  fonts:
+    - family: NotoSansHK
+      fonts:
+        - asset: assets/fonts/NotoSansHK-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/NotoSansHK-Bold.ttf
+          weight: 700 

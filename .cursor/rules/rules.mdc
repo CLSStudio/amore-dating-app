@@ -1,0 +1,60 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+create a new mobile application project named 'Amore'. This app must be a native cross-platform (Android & iOS) application, intended for release on the Google Play Store and Apple App Store, specifically targeting the Hong Kong market.
+
+Amore aims to attract both Gen Z and 30-40 year olds by offering a dating experience that goes beyond Tinder and Bumble. It will focus on deeper, safer connections supported by professional AI love consultant services. Ensure the project's infrastructure and UI/UX design are optimized for mobile devices and can be tested on Android and iOS emulators. Prioritize using Flutter as the development framework for native performance and cross-platform compatibility.
+
+Core Features & AI Integration Points:
+Intelligent Profile Creation & Presentation:
+
+In-Depth Profile Creation: Users can create profiles including photos, personal details, interests, and lifestyle habits. Options to include short video clips or connect Spotify/TikTok accounts should be available.
+MBTI Personality Assessment: An AI-guided questionnaire for MBTI assessment, with results integrated into user profiles.
+Values & Life Stage Questionnaire: An AI-driven questionnaire to deeply understand users' core values, life goals (e.g., career aspirations, family planning, travel desires), and relationship expectations. This is particularly crucial for the 30-40 age group.
+Interactive Profiles: Allow users to post temporary "stories" or "challenges" to showcase their personality.
+Settings Panel: Users can manage profile visibility, notification preferences, and privacy settings.
+AI-Driven Precise Matching & Insights:
+
+MBTI & Values Matching: Utilize AI algorithms for highly precise matching based on MBTI compatibility and deep values questionnaire results.
+Lifestyle/Activity Matching: Pair users based on shared hobbies and activity preferences (e.g., outdoor activities, arts, gaming, specific cuisines) and suggest relevant activity ideas.
+"Connection Intent" Filtering: Allow users to explicitly state their relationship intent (e.g., "seeking long-term relationship," "casual dating," "friendship," "networking") and factor this into matching.
+Profile Heat Index (Premium Feature): AI analyzes a user's profile views, likes received, conversation initiation rate, and overall activity to generate a trending index or score. This positively motivates users to optimize their profiles and engage more.
+Relationship Potential Analysis (Premium Feature): When viewing a match's profile, AI, based on your combined compatibility (MBTI, values, shared interests), provides an estimated "connection potential" percentage, encouraging interaction with high-potential matches.
+Innovative Interaction & Communication:
+
+Smooth Swipe Interface: Optimize swipe functionality to like or pass on profiles with fluid transitions.
+Real-Time Chat: Provide a real-time chat interface for matched users.
+AI Icebreakers (Multi-layered):
+General Icebreakers: AI suggests conversation starters based on basic profile information of both users.
+MBTI-Tailored Icebreakers: AI generates more creative and personalized icebreaker prompts based on the MBTI types of both users.
+"Date Idea" Generation: AI suggests customized real-world or virtual date ideas based on shared interests and location.
+Collaborative Media Interaction: Allow matched users to create shared music playlists or movie watchlists.
+In-App Video Call Functionality:
+Safe Pre-Meeting: Users, once matched and agreed, can engage in one-on-one video calls within the app for a "vibe check" and initial verification before meeting in person.
+Scheduled & Instant Options: Support scheduling specific times for video calls, or initiating instant call requests.
+Enhanced Safety: Include robust in-call reporting and blocking features to ensure call safety.
+AI Assistance (Future): Potentially integrate AI to analyze video patterns for inconsistencies or red flags to enhance security.
+Enhanced Safety & Authenticity (AI Core):
+
+AI Photo Verification: AI authenticates profile photos using the user's device camera to ensure authenticity and reduce catfishing.
+AI Fraud Detection: AI continuously analyzes user language and behavioral patterns in chat to flag and alert users to potentially fraudulent activities or inappropriate language.
+Optional Voice Verification: Users can record a short voice clip, verified by AI, to further enhance profile authenticity.
+Behavioral Pattern Analysis: AI monitors unusual behavior to protect users from harassment or fake accounts.
+Premium Paid Feature: "Amore Love Consultant" Service:
+
+AI Smart Date Planner: Based on both users' preferences, budget, relationship stage, and specific preferences for Hong Kong areas, AI generates 2-3 personalized date itinerary suggestions, including locations, estimated duration, cost, and transportation.
+"Relationship Progression" Strategy Advisor:
+AI-Assisted Communication Advice: AI provides communication strategies, timing judgments, and dialogue frameworks based on users' anonymized scenario descriptions and and profiles.
+Human Consultant In-Depth Guidance (Premium Option): Provide access to anonymized consultations with professional love consultants for more specific, empathetic guidance on relationship progression (with clear service boundaries, avoiding therapy).
+"Special Moments" Planning & Reminders: Users can log important anniversaries. Amore will proactively remind them and suggest celebration activities and gift ideas based on partner preferences and relationship stages.
+Project Deliverables:
+Provide a runnable prototype with validated functionality on Android/iOS emulators.
+The project structure should be clear, facilitating subsequent development and deployment.
+Integrate Firebase services (Authentication, Realtime Database/Firestore, Cloud Storage, Cloud Functions, and potential payment services) to support all listed functionalities.
+Allocate space for integrating Firebase App Distribution for testing releases.
+Targeted User Experience:
+Gen Z: Feels trendy, authentic, fun, and capable of building genuinely meaningful connections, while receiving engaging, personalized help in their relationships.
+
+30-40 Year Olds: Feels safe, efficient, capable of finding potential partners aligned with their values and life goals, and receives professional guidance to confidently progress relationships.

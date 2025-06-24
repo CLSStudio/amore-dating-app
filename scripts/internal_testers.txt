@@ -1,0 +1,7 @@
+# 內部測試人員電子郵件列表
+# 每行一個電子郵件地址
+# 
+# 示例:
+info@clsstudio.online
+developer1@example.com
+qa@example.com 

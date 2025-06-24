@@ -1,0 +1,10 @@
+# Beta 測試人員電子郵件列表
+# 每行一個電子郵件地址
+# 
+# 示例:
+# user1@gmail.com
+# user2@outlook.com
+# beta.tester@yahoo.com
+beta.tester1@gmail.com
+beta.tester2@outlook.com
+hong.kong.tester@yahoo.com 

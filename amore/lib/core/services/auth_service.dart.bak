@@ -1,0 +1,473 @@
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:google_sign_in/google_sign_in.dart' if (dart.library.io) 'package:google_sign_in/google_sign_in.dart';
+import 'package:flutter/foundation.dart';
+
+import '../app_config.dart';
+import 'firebase_service.dart';
+import '../models/user_model.dart';
+
+/// Firebase 認證服務
+/// 處理用戶註冊、登錄、登出等認證相關功能
+class AuthService {
+  static FirebaseAuth get _auth => FirebaseService.auth;
+  static FirebaseFirestore get _firestore => FirebaseService.firestore;
+
+  /// 用戶狀態變化流
+  static Stream<User?> get authStateChanges => _auth.authStateChanges();
+
+  /// 當前用戶
+  static User? get currentUser => _auth.currentUser;
+
+  /// 是否已登錄
+  static bool get isLoggedIn => _auth.currentUser != null;
+
+  /// 電子郵件密碼註冊
+  static Future<UserCredential> registerWithEmailPassword({
+    required String email,
+    required String password,
+    required String name,
+    required DateTime birthDate,
+    required String gender,
+    required String interestedIn,
+  }) async {
+    try {
+      // 創建用戶帳戶
+      final userCredential = await _auth.createUserWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+
+      final user = userCredential.user;
+      if (user != null) {
+        // 更新用戶顯示名稱
+        await user.updateDisplayName(name);
+
+        // 創建用戶檔案
+        final userModel = UserModel(
+          id: user.uid,
+          email: email,
+          name: name,
+          birthDate: birthDate,
+          gender: gender,
+          interestedIn: interestedIn,
+          createdAt: DateTime.now(),
+          isEmailVerified: user.emailVerified,
+          isProfileComplete: false,
+        );
+
+        // 保存到 Firestore
+        await _createUserProfile(userModel);
+
+        // 發送驗證郵件
+        if (!user.emailVerified) {
+          await user.sendEmailVerification();
+        }
+
+        // 記錄事件
+        await FirebaseService.logEvent(
+          name: 'user_register',
+          parameters: {
+            'method': 'email_password',
+            'user_id': user.uid,
+          },
+        );
+
+        // 設置用戶 ID
+        await FirebaseService.setUserId(user.uid);
+
+        if (AppConfig.enableDebugLogs) {
+          print('✅ 用戶註冊成功: ${user.email}');
+        }
+      }
+
+      return userCredential;
+    } on FirebaseAuthException catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'registerWithEmailPassword',
+          'error_code': e.code,
+        },
+      );
+
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// 電子郵件密碼登錄
+  static Future<UserCredential> signInWithEmailPassword({
+    required String email,
+    required String password,
+  }) async {
+    try {
+      final userCredential = await _auth.signInWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+
+      final user = userCredential.user;
+      if (user != null) {
+        // 更新最後登錄時間
+        await _updateLastLogin(user.uid);
+
+        // 更新在線狀態
+        await FirebaseService.updateUserPresence(true);
+
+        // 記錄事件
+        await FirebaseService.logEvent(
+          name: 'user_login',
+          parameters: {
+            'method': 'email_password',
+            'user_id': user.uid,
+          },
+        );
+
+        // 設置用戶 ID
+        await FirebaseService.setUserId(user.uid);
+
+        if (AppConfig.enableDebugLogs) {
+          print('✅ 用戶登錄成功: ${user.email}');
+        }
+      }
+
+      return userCredential;
+    } on FirebaseAuthException catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'signInWithEmailPassword',
+          'error_code': e.code,
+        },
+      );
+
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// Google 登錄
+  static Future<UserCredential?> signInWithGoogle() async {
+    try {
+      if (kIsWeb) {
+        // Web 平台
+        final googleProvider = GoogleAuthProvider();
+        final userCredential = await _auth.signInWithPopup(googleProvider);
+        await _handleSocialLogin(userCredential, 'google');
+        return userCredential;
+      } else {
+        // 移動平台
+        // 注意：需要添加 google_sign_in 依賴項和配置
+        throw UnimplementedError('Google 登錄需要額外配置');
+      }
+    } on FirebaseAuthException catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'signInWithGoogle',
+          'error_code': e.code,
+        },
+      );
+
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// 手機號碼登錄
+  static Future<void> signInWithPhoneNumber({
+    required String phoneNumber,
+    required Function(String verificationId) onCodeSent,
+    required Function(PhoneAuthCredential credential) onVerificationCompleted,
+    required Function(FirebaseAuthException error) onVerificationFailed,
+  }) async {
+    try {
+      await _auth.verifyPhoneNumber(
+        phoneNumber: phoneNumber,
+        verificationCompleted: onVerificationCompleted,
+        verificationFailed: onVerificationFailed,
+        codeSent: (String verificationId, int? resendToken) {
+          onCodeSent(verificationId);
+        },
+        codeAutoRetrievalTimeout: (String verificationId) {
+          // 自動檢索超時
+        },
+        timeout: const Duration(seconds: 60),
+      );
+    } on FirebaseAuthException catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'signInWithPhoneNumber',
+          'error_code': e.code,
+        },
+      );
+
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// 驗證手機驗證碼
+  static Future<UserCredential> verifyPhoneCode({
+    required String verificationId,
+    required String smsCode,
+  }) async {
+    try {
+      final credential = PhoneAuthProvider.credential(
+        verificationId: verificationId,
+        smsCode: smsCode,
+      );
+
+      final userCredential = await _auth.signInWithCredential(credential);
+      await _handleSocialLogin(userCredential, 'phone');
+      
+      return userCredential;
+    } on FirebaseAuthException catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'verifyPhoneCode',
+          'error_code': e.code,
+        },
+      );
+
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// 重設密碼
+  static Future<void> resetPassword(String email) async {
+    try {
+      await _auth.sendPasswordResetEmail(email: email);
+
+      await FirebaseService.logEvent(
+        name: 'password_reset_requested',
+        parameters: {'email': email},
+      );
+
+      if (AppConfig.enableDebugLogs) {
+        print('✅ 密碼重設郵件已發送: $email');
+      }
+    } on FirebaseAuthException catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'resetPassword',
+          'error_code': e.code,
+        },
+      );
+
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// 登出
+  static Future<void> signOut() async {
+    try {
+      final userId = currentUser?.uid;
+      
+      // 更新在線狀態
+      if (userId != null) {
+        await FirebaseService.updateUserPresence(false);
+      }
+
+      // 登出
+      await _auth.signOut();
+
+      // 記錄事件
+      if (userId != null) {
+        await FirebaseService.logEvent(
+          name: 'user_logout',
+          parameters: {'user_id': userId},
+        );
+      }
+
+      if (AppConfig.enableDebugLogs) {
+        print('✅ 用戶登出成功');
+      }
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {'method': 'signOut'},
+      );
+
+      if (AppConfig.enableDebugLogs) {
+        print('❌ 登出失敗: $e');
+      }
+    }
+  }
+
+  /// 刪除帳戶
+  static Future<void> deleteAccount() async {
+    try {
+      final user = currentUser;
+      if (user == null) throw Exception('用戶未登錄');
+
+      final userId = user.uid;
+
+      // 刪除 Firestore 中的用戶資料
+      await _deleteUserData(userId);
+
+      // 刪除 Auth 中的用戶
+      await user.delete();
+
+      // 記錄事件
+      await FirebaseService.logEvent(
+        name: 'user_account_deleted',
+        parameters: {'user_id': userId},
+      );
+
+      if (AppConfig.enableDebugLogs) {
+        print('✅ 帳戶刪除成功');
+      }
+    } on FirebaseAuthException catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'deleteAccount',
+          'error_code': e.code,
+        },
+      );
+
+      throw _handleAuthException(e);
+    }
+  }
+
+  /// 獲取用戶檔案
+  static Future<UserModel?> getUserProfile(String userId) async {
+    try {
+      final doc = await _firestore
+          .collection(AppConstants.usersCollection)
+          .doc(userId)
+          .get();
+
+      if (doc.exists) {
+        return UserModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'getUserProfile',
+          'user_id': userId,
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 處理社交登錄
+  static Future<void> _handleSocialLogin(UserCredential userCredential, String method) async {
+    final user = userCredential.user;
+    if (user == null) return;
+
+    // 檢查是否是新用戶
+    final isNewUser = userCredential.additionalUserInfo?.isNewUser ?? false;
+
+    if (isNewUser) {
+      // 創建新用戶檔案
+      final userModel = UserModel(
+        id: user.uid,
+        email: user.email ?? '',
+        name: user.displayName ?? '',
+        photoUrl: user.photoURL,
+        createdAt: DateTime.now(),
+        isEmailVerified: user.emailVerified,
+        isProfileComplete: false,
+      );
+
+      await _createUserProfile(userModel);
+    } else {
+      // 更新最後登錄時間
+      await _updateLastLogin(user.uid);
+    }
+
+    // 更新在線狀態
+    await FirebaseService.updateUserPresence(true);
+
+    // 記錄事件
+    await FirebaseService.logEvent(
+      name: 'user_login',
+      parameters: {
+        'method': method,
+        'user_id': user.uid,
+        'is_new_user': isNewUser,
+      },
+    );
+
+    // 設置用戶 ID
+    await FirebaseService.setUserId(user.uid);
+  }
+
+  /// 創建用戶檔案
+  static Future<void> _createUserProfile(UserModel userModel) async {
+    await _firestore
+        .collection(AppConstants.usersCollection)
+        .doc(userModel.id)
+        .set(userModel.toFirestore());
+  }
+
+  /// 更新最後登錄時間
+  static Future<void> _updateLastLogin(String userId) async {
+    await _firestore
+        .collection(AppConstants.usersCollection)
+        .doc(userId)
+        .update({
+      'lastLoginAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// 刪除用戶資料
+  static Future<void> _deleteUserData(String userId) async {
+    final batch = _firestore.batch();
+
+    // 刪除用戶檔案
+    batch.delete(_firestore.collection(AppConstants.usersCollection).doc(userId));
+
+    // 刪除用戶的對話（需要根據實際資料結構調整）
+    // TODO: 實現刪除相關資料的邏輯
+
+    await batch.commit();
+  }
+
+  /// 處理認證異常
+  static Exception _handleAuthException(FirebaseAuthException e) {
+    String message;
+    
+    switch (e.code) {
+      case 'user-not-found':
+        message = '找不到該用戶帳戶';
+        break;
+      case 'wrong-password':
+        message = '密碼錯誤';
+        break;
+      case 'email-already-in-use':
+        message = '該電子郵件已被使用';
+        break;
+      case 'weak-password':
+        message = '密碼強度不足';
+        break;
+      case 'invalid-email':
+        message = '電子郵件格式不正確';
+        break;
+      case 'too-many-requests':
+        message = '請求過於頻繁，請稍後再試';
+        break;
+      case 'network-request-failed':
+        message = '網絡連接失敗';
+        break;
+      default:
+        message = e.message ?? '認證失敗';
+    }
+    
+    return Exception(message);
+  }
+} 

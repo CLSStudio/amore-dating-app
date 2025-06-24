@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Amore</string>
+    <string name="app_description">深度連結約會應用</string>
+    <string name="notification_channel_name">Amore 通知</string>
+    <string name="notification_channel_description">接收配對、消息和其他重要通知</string>
+</resources> 

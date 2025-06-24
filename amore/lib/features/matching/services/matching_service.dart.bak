@@ -1,0 +1,535 @@
+import 'dart:math';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:geolocator/geolocator.dart';
+
+import '../../../core/services/firebase_service.dart';
+import '../../../core/models/user_model.dart';
+import '../../../core/models/match_model.dart';
+import '../../../core/app_config.dart';
+
+/// 智能配對算法服務
+class MatchingService {
+  static FirebaseFirestore get _firestore => FirebaseService.firestore;
+  
+  /// 獲取配對候選人
+  static Future<List<MatchCandidate>> getMatchCandidates({
+    required String userId,
+    int limit = 20,
+  }) async {
+    try {
+      // 獲取當前用戶資料
+      final currentUser = await _getCurrentUser(userId);
+      if (currentUser == null) return [];
+
+      // 獲取潛在匹配用戶
+      final potentialMatches = await _getPotentialMatches(currentUser);
+
+      // 計算兼容性評分
+      final candidates = <MatchCandidate>[];
+      for (final user in potentialMatches) {
+        final candidate = await _calculateCompatibility(currentUser, user);
+        if (candidate != null && candidate.compatibilityScore >= AppConfig.minMatchThreshold) {
+          candidates.add(candidate);
+        }
+      }
+
+      // 按兼容性評分排序
+      candidates.sort((a, b) => b.compatibilityScore.compareTo(a.compatibilityScore));
+
+      // 記錄配對事件
+      await FirebaseService.logEvent(
+        name: 'matches_generated',
+        parameters: {
+          'user_id': userId,
+          'candidates_count': candidates.length,
+          'avg_score': candidates.isNotEmpty 
+              ? candidates.map((c) => c.compatibilityScore).reduce((a, b) => a + b) / candidates.length
+              : 0.0,
+        },
+      );
+
+      return candidates.take(limit).toList();
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'getMatchCandidates',
+          'user_id': userId,
+        },
+      );
+      return [];
+    }
+  }
+
+  /// 處理滑卡動作
+  static Future<MatchModel?> handleSwipeAction({
+    required String userId,
+    required String targetUserId,
+    required bool isLike,
+  }) async {
+    try {
+      // 記錄滑卡動作
+      await _recordSwipeAction(userId, targetUserId, isLike);
+
+      if (!isLike) {
+        // 如果是拒絕，直接返回
+        await FirebaseService.logEvent(
+          name: 'user_swiped',
+          parameters: {
+            'user_id': userId,
+            'target_user_id': targetUserId,
+            'action': 'reject',
+          },
+        );
+        return null;
+      }
+
+      // 檢查是否互相喜歡
+      final isMatch = await _checkMutualLike(userId, targetUserId);
+      
+      if (isMatch) {
+        // 創建配對
+        final match = await _createMatch(userId, targetUserId);
+        
+        // 發送配對通知
+        await _sendMatchNotifications(userId, targetUserId);
+        
+        await FirebaseService.logEvent(
+          name: 'match_created',
+          parameters: {
+            'user_id': userId,
+            'target_user_id': targetUserId,
+            'match_id': match.id,
+          },
+        );
+
+        return match;
+      } else {
+        await FirebaseService.logEvent(
+          name: 'user_swiped',
+          parameters: {
+            'user_id': userId,
+            'target_user_id': targetUserId,
+            'action': 'like',
+          },
+        );
+      }
+
+      return null;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'handleSwipeAction',
+          'user_id': userId,
+          'target_user_id': targetUserId,
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 獲取用戶的配對列表
+  static Future<List<MatchModel>> getUserMatches(String userId) async {
+    try {
+      final querySnapshot = await _firestore
+          .collection(AppConstants.matchesCollection)
+          .where('status', isEqualTo: MatchStatus.matched.toString())
+          .where('userIds', arrayContains: userId)
+          .orderBy('matchedAt', descending: true)
+          .get();
+
+      return querySnapshot.docs
+          .map((doc) => MatchModel.fromFirestore(doc))
+          .toList();
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'getUserMatches',
+          'user_id': userId,
+        },
+      );
+      return [];
+    }
+  }
+
+  /// 計算兼容性評分
+  static Future<MatchCandidate?> _calculateCompatibility(
+    UserModel currentUser,
+    UserModel targetUser,
+  ) async {
+    try {
+      final scores = <String, double>{};
+      double totalScore = 0.0;
+
+      // 1. MBTI 兼容性 (權重: 30%)
+      final mbtiScore = _calculateMBTICompatibility(
+        currentUser.preferences.mbtiType ?? '',
+        targetUser.preferences.mbtiType ?? '',
+      );
+      scores['mbti'] = mbtiScore;
+      totalScore += mbtiScore * 0.3;
+
+      // 2. 興趣匹配度 (權重: 25%)
+      final interestScore = _calculateInterestCompatibility(
+        currentUser.interests,
+        targetUser.interests,
+      );
+      scores['interests'] = interestScore;
+      totalScore += interestScore * 0.25;
+
+      // 3. 年齡匹配度 (權重: 15%)
+      final ageScore = _calculateAgeCompatibility(
+        currentUser.age ?? 0,
+        targetUser.age ?? 0,
+        currentUser.settings.minAge,
+        currentUser.settings.maxAge,
+      );
+      scores['age'] = ageScore;
+      totalScore += ageScore * 0.15;
+
+      // 4. 地理位置 (權重: 15%)
+      final distance = await _calculateDistance(currentUser, targetUser);
+      final locationScore = _calculateLocationCompatibility(
+        distance,
+        currentUser.settings.maxDistance.toDouble(),
+      );
+      scores['location'] = locationScore;
+      totalScore += locationScore * 0.15;
+
+      // 5. 價值觀匹配 (權重: 10%)
+      final valuesScore = _calculateValuesCompatibility(
+        currentUser.preferences,
+        targetUser.preferences,
+      );
+      scores['values'] = valuesScore;
+      totalScore += valuesScore * 0.10;
+
+      // 6. 活躍度 (權重: 5%)
+      final activityScore = _calculateActivityScore(targetUser);
+      scores['activity'] = activityScore;
+      totalScore += activityScore * 0.05;
+
+      // 計算共同興趣
+      final commonInterests = currentUser.interests
+          .where((interest) => targetUser.interests.contains(interest))
+          .toList();
+
+      // 生成兼容性說明
+      final compatibilityReason = _generateCompatibilityReason(scores, commonInterests);
+
+      return MatchCandidate(
+        userId: targetUser.id,
+        compatibilityScore: totalScore,
+        distance: distance,
+        lastActive: targetUser.lastSeen ?? targetUser.createdAt,
+        scoreDetails: scores,
+        commonInterests: commonInterests,
+        compatibilityReason: compatibilityReason,
+      );
+    } catch (e) {
+      if (AppConfig.enableDebugLogs) {
+        print('❌ 計算兼容性失敗: $e');
+      }
+      return null;
+    }
+  }
+
+  /// 獲取當前用戶資料
+  static Future<UserModel?> _getCurrentUser(String userId) async {
+    try {
+      final doc = await _firestore
+          .collection(AppConstants.usersCollection)
+          .doc(userId)
+          .get();
+      
+      if (doc.exists) {
+        return UserModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 獲取潛在配對用戶
+  static Future<List<UserModel>> _getPotentialMatches(UserModel currentUser) async {
+    try {
+      // 構建查詢條件
+      Query query = _firestore.collection(AppConstants.usersCollection);
+
+      // 排除自己
+      query = query.where(FieldPath.documentId, isNotEqualTo: currentUser.id);
+
+      // 性別偏好篩選
+      if (currentUser.interestedIn != null && currentUser.interestedIn != 'all') {
+        query = query.where('gender', isEqualTo: currentUser.interestedIn);
+      }
+
+      // 年齡範圍篩選
+      final minBirthDate = DateTime.now().subtract(Duration(days: currentUser.settings.maxAge * 365));
+      final maxBirthDate = DateTime.now().subtract(Duration(days: currentUser.settings.minAge * 365));
+      query = query.where('birthDate', isGreaterThanOrEqualTo: Timestamp.fromDate(minBirthDate));
+      query = query.where('birthDate', isLessThanOrEqualTo: Timestamp.fromDate(maxBirthDate));
+
+      // 只顯示完整的個人檔案
+      query = query.where('isProfileComplete', isEqualTo: true);
+
+      // 限制結果數量
+      query = query.limit(100);
+
+      final querySnapshot = await query.get();
+      
+      final users = querySnapshot.docs
+          .map((doc) => UserModel.fromFirestore(doc))
+          .toList();
+
+      // 排除已經互動過的用戶
+      final filteredUsers = await _filterInteractedUsers(currentUser.id, users);
+
+      return filteredUsers;
+    } catch (e) {
+      if (AppConfig.enableDebugLogs) {
+        print('❌ 獲取潛在配對用戶失敗: $e');
+      }
+      return [];
+    }
+  }
+
+  /// 排除已經互動過的用戶
+  static Future<List<UserModel>> _filterInteractedUsers(
+    String userId,
+    List<UserModel> users,
+  ) async {
+    try {
+      // 獲取已經滑過的用戶
+      final swipesQuery = await _firestore
+          .collection(AppConstants.swipesCollection)
+          .where('userId', isEqualTo: userId)
+          .get();
+
+      final swipedUserIds = swipesQuery.docs
+          .map((doc) => doc.data()['targetUserId'] as String)
+          .toSet();
+
+      // 過濾掉已經滑過的用戶
+      return users.where((user) => !swipedUserIds.contains(user.id)).toList();
+    } catch (e) {
+      return users; // 如果出錯，返回原始列表
+    }
+  }
+
+  /// 計算 MBTI 兼容性
+  static double _calculateMBTICompatibility(String type1, String type2) {
+    if (type1.isEmpty || type2.isEmpty) return 0.5;
+    return MBTICompatibility.getCompatibilityScore(type1, type2);
+  }
+
+  /// 計算興趣匹配度
+  static double _calculateInterestCompatibility(
+    List<String> interests1,
+    List<String> interests2,
+  ) {
+    if (interests1.isEmpty || interests2.isEmpty) return 0.0;
+    
+    final common = interests1.where((i) => interests2.contains(i)).length;
+    final total = (interests1.length + interests2.length) / 2;
+    
+    return min(1.0, common / total);
+  }
+
+  /// 計算年齡兼容性
+  static double _calculateAgeCompatibility(
+    int age1,
+    int age2,
+    int minAge,
+    int maxAge,
+  ) {
+    if (age1 == 0 || age2 == 0) return 0.5;
+    if (age2 < minAge || age2 > maxAge) return 0.0;
+    
+    final ageDiff = (age1 - age2).abs();
+    if (ageDiff <= 2) return 1.0;
+    if (ageDiff <= 5) return 0.8;
+    if (ageDiff <= 10) return 0.6;
+    return 0.3;
+  }
+
+  /// 計算地理距離
+  static Future<double> _calculateDistance(
+    UserModel user1,
+    UserModel user2,
+  ) async {
+    if (user1.latitude == null || user1.longitude == null ||
+        user2.latitude == null || user2.longitude == null) {
+      return 999.0; // 未知距離
+    }
+
+    return Geolocator.distanceBetween(
+      user1.latitude!,
+      user1.longitude!,
+      user2.latitude!,
+      user2.longitude!,
+    ) / 1000; // 轉換為公里
+  }
+
+  /// 計算位置兼容性
+  static double _calculateLocationCompatibility(double distance, double maxDistance) {
+    if (distance > maxDistance) return 0.0;
+    return 1.0 - (distance / maxDistance);
+  }
+
+  /// 計算價值觀匹配度
+  static double _calculateValuesCompatibility(
+    UserPreferences prefs1,
+    UserPreferences prefs2,
+  ) {
+    double score = 0.0;
+    int factors = 0;
+
+    // 關係目標
+    if (prefs1.relationshipGoals.isNotEmpty && prefs2.relationshipGoals.isNotEmpty) {
+      final common = prefs1.relationshipGoals
+          .where((goal) => prefs2.relationshipGoals.contains(goal))
+          .length;
+      score += common / max(prefs1.relationshipGoals.length, prefs2.relationshipGoals.length);
+      factors++;
+    }
+
+    // 生活方式偏好
+    // 可以添加更多價值觀比較邏輯
+
+    return factors > 0 ? score / factors : 0.5;
+  }
+
+  /// 計算活躍度評分
+  static double _calculateActivityScore(UserModel user) {
+    final lastSeen = user.lastSeen ?? user.createdAt;
+    final daysSinceActive = DateTime.now().difference(lastSeen).inDays;
+    
+    if (daysSinceActive <= 1) return 1.0;
+    if (daysSinceActive <= 3) return 0.8;
+    if (daysSinceActive <= 7) return 0.6;
+    if (daysSinceActive <= 30) return 0.4;
+    return 0.2;
+  }
+
+  /// 生成兼容性說明
+  static String _generateCompatibilityReason(
+    Map<String, double> scores,
+    List<String> commonInterests,
+  ) {
+    final reasons = <String>[];
+
+    if (scores['mbti']! > 0.7) {
+      reasons.add('性格類型非常匹配');
+    }
+    
+    if (commonInterests.isNotEmpty) {
+      reasons.add('有 ${commonInterests.length} 個共同興趣');
+    }
+    
+    if (scores['location']! > 0.8) {
+      reasons.add('距離很近');
+    }
+
+    if (reasons.isEmpty) {
+      return '你們可能有潛在的化學反應';
+    }
+
+    return reasons.join('，');
+  }
+
+  /// 記錄滑卡動作
+  static Future<void> _recordSwipeAction(
+    String userId,
+    String targetUserId,
+    bool isLike,
+  ) async {
+    await _firestore.collection(AppConstants.swipesCollection).add({
+      'userId': userId,
+      'targetUserId': targetUserId,
+      'isLike': isLike,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
+  }
+
+  /// 檢查互相喜歡
+  static Future<bool> _checkMutualLike(String userId, String targetUserId) async {
+    final query = await _firestore
+        .collection(AppConstants.swipesCollection)
+        .where('userId', isEqualTo: targetUserId)
+        .where('targetUserId', isEqualTo: userId)
+        .where('isLike', isEqualTo: true)
+        .limit(1)
+        .get();
+
+    return query.docs.isNotEmpty;
+  }
+
+  /// 創建配對
+  static Future<MatchModel> _createMatch(String userId1, String userId2) async {
+    final users = await _calculateCompatibility(
+      await _getCurrentUser(userId1) ?? UserModel(
+        id: userId1, 
+        email: '', 
+        name: '', 
+        createdAt: DateTime.now(),
+      ),
+      await _getCurrentUser(userId2) ?? UserModel(
+        id: userId2, 
+        email: '', 
+        name: '', 
+        createdAt: DateTime.now(),
+      ),
+    );
+
+    final match = MatchModel(
+      id: '',
+      userId1: userId1,
+      userId2: userId2,
+      compatibilityScore: users?.compatibilityScore ?? 0.5,
+      scoreBreakdown: users?.scoreDetails ?? {},
+      status: MatchStatus.matched,
+      createdAt: DateTime.now(),
+      matchedAt: DateTime.now(),
+    );
+
+    final docRef = await _firestore
+        .collection(AppConstants.matchesCollection)
+        .add(match.toFirestore());
+
+    return match.copyWith(id: docRef.id);
+  }
+
+  /// 發送配對通知
+  static Future<void> _sendMatchNotifications(String userId1, String userId2) async {
+    // 這裡實現推送通知邏輯
+    // 可以使用 Firebase Cloud Messaging
+  }
+}
+
+/// 擴展 MatchModel 以支持 copyWith
+extension MatchModelExtension on MatchModel {
+  MatchModel copyWith({
+    String? id,
+    MatchStatus? status,
+    DateTime? matchedAt,
+  }) {
+    return MatchModel(
+      id: id ?? this.id,
+      userId1: userId1,
+      userId2: userId2,
+      compatibilityScore: compatibilityScore,
+      scoreBreakdown: scoreBreakdown,
+      status: status ?? this.status,
+      createdAt: createdAt,
+      matchedAt: matchedAt ?? this.matchedAt,
+      note: note,
+    );
+  }
+} 

@@ -1,0 +1,417 @@
+import 'dart:async';
+import 'package:agora_rtc_engine/agora_rtc_engine.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../../core/services/firebase_service.dart';
+import '../../../core/models/video_call_model.dart';
+import '../../../core/app_config.dart';
+
+/// 視頻通話服務
+class VideoCallService {
+  static const String _agoraAppId = 'YOUR_AGORA_APP_ID'; // 需要在 Agora 控制台獲取
+  static FirebaseFirestore get _firestore => FirebaseService.firestore;
+  static const _uuid = Uuid();
+  
+  static RtcEngine? _engine;
+  static StreamSubscription? _callSubscription;
+  
+  /// 初始化 Agora 引擎
+  static Future<bool> initializeAgora() async {
+    try {
+      // 檢查和請求權限
+      final cameraPermission = await Permission.camera.request();
+      final microphonePermission = await Permission.microphone.request();
+      
+      if (cameraPermission != PermissionStatus.granted || 
+          microphonePermission != PermissionStatus.granted) {
+        if (AppConfig.enableDebugLogs) {
+          print('❌ 視頻通話權限被拒絕');
+        }
+        return false;
+      }
+
+      // 創建 Agora 引擎
+      _engine = createAgoraRtcEngine();
+      await _engine!.initialize(const RtcEngineContext(
+        appId: _agoraAppId,
+        channelProfile: ChannelProfileType.channelProfileCommunication,
+      ));
+
+      // 啟用視頻模組
+      await _engine!.enableVideo();
+      await _engine!.enableAudio();
+
+      if (AppConfig.enableDebugLogs) {
+        print('✅ Agora 引擎初始化成功');
+      }
+
+      return true;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {'method': 'initializeAgora'},
+      );
+      return false;
+    }
+  }
+
+  /// 發起視頻通話
+  static Future<VideoCallModel?> startVideoCall({
+    required String callerId,
+    required String receiverId,
+    CallType type = CallType.video,
+  }) async {
+    try {
+      if (_engine == null) {
+        final initialized = await initializeAgora();
+        if (!initialized) return null;
+      }
+
+      final callId = _uuid.v4();
+      final channelName = 'call_$callId';
+
+      // 創建通話記錄
+      final call = VideoCallModel(
+        id: callId,
+        callerId: callerId,
+        receiverId: receiverId,
+        channelName: channelName,
+        type: type,
+        status: CallStatus.calling,
+        createdAt: DateTime.now(),
+      );
+
+      await _firestore
+          .collection(AppConstants.videoChatCollection)
+          .doc(callId)
+          .set(call.toFirestore());
+
+      // 發送通話通知給接收者
+      await _sendCallNotification(call);
+
+      // 記錄事件
+      await FirebaseService.logEvent(
+        name: 'video_call_initiated',
+        parameters: {
+          'call_id': callId,
+          'caller_id': callerId,
+          'receiver_id': receiverId,
+          'call_type': type.toString(),
+        },
+      );
+
+      return call;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'startVideoCall',
+          'caller_id': callerId,
+          'receiver_id': receiverId,
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 接聽通話
+  static Future<bool> acceptCall(String callId) async {
+    try {
+      await _firestore
+          .collection(AppConstants.videoChatCollection)
+          .doc(callId)
+          .update({
+        'status': CallStatus.ongoing.toString(),
+        'startedAt': FieldValue.serverTimestamp(),
+      });
+
+      await FirebaseService.logEvent(
+        name: 'video_call_accepted',
+        parameters: {'call_id': callId},
+      );
+
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 拒絕通話
+  static Future<bool> declineCall(String callId, String reason) async {
+    try {
+      await _firestore
+          .collection(AppConstants.videoChatCollection)
+          .doc(callId)
+          .update({
+        'status': CallStatus.declined.toString(),
+        'endedAt': FieldValue.serverTimestamp(),
+        'endReason': reason,
+      });
+
+      await FirebaseService.logEvent(
+        name: 'video_call_declined',
+        parameters: {
+          'call_id': callId,
+          'reason': reason,
+        },
+      );
+
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 結束通話
+  static Future<bool> endCall(String callId, String endReason) async {
+    try {
+      final call = await getCall(callId);
+      if (call == null) return false;
+
+      int? duration;
+      if (call.startedAt != null) {
+        duration = DateTime.now().difference(call.startedAt!).inSeconds;
+      }
+
+      await _firestore
+          .collection(AppConstants.videoChatCollection)
+          .doc(callId)
+          .update({
+        'status': CallStatus.ended.toString(),
+        'endedAt': FieldValue.serverTimestamp(),
+        'duration': duration,
+        'endReason': endReason,
+      });
+
+      // 離開 Agora 頻道
+      await _engine?.leaveChannel();
+
+      await FirebaseService.logEvent(
+        name: 'video_call_ended',
+        parameters: {
+          'call_id': callId,
+          'duration': duration,
+          'end_reason': endReason,
+        },
+      );
+
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 加入通話頻道
+  static Future<bool> joinChannel({
+    required String channelName,
+    required String token,
+    required int uid,
+  }) async {
+    try {
+      if (_engine == null) return false;
+
+      await _engine!.joinChannel(
+        token: token,
+        channelId: channelName,
+        uid: uid,
+        options: const ChannelMediaOptions(),
+      );
+
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /// 離開通話頻道
+  static Future<void> leaveChannel() async {
+    try {
+      await _engine?.leaveChannel();
+    } catch (e) {
+      // 忽略離開頻道的錯誤
+    }
+  }
+
+  /// 切換攝像頭
+  static Future<void> switchCamera() async {
+    try {
+      await _engine?.switchCamera();
+    } catch (e) {
+      // 忽略錯誤
+    }
+  }
+
+  /// 開關攝像頭
+  static Future<void> toggleCamera(bool enabled) async {
+    try {
+      await _engine?.enableLocalVideo(enabled);
+    } catch (e) {
+      // 忽略錯誤
+    }
+  }
+
+  /// 開關麥克風
+  static Future<void> toggleMicrophone(bool enabled) async {
+    try {
+      await _engine?.enableLocalAudio(enabled);
+    } catch (e) {
+      // 忽略錯誤
+    }
+  }
+
+  /// 開關擴音器
+  static Future<void> toggleSpeaker(bool enabled) async {
+    try {
+      await _engine?.setEnableSpeakerphone(enabled);
+    } catch (e) {
+      // 忽略錯誤
+    }
+  }
+
+  /// 獲取通話信息
+  static Future<VideoCallModel?> getCall(String callId) async {
+    try {
+      final doc = await _firestore
+          .collection(AppConstants.videoChatCollection)
+          .doc(callId)
+          .get();
+
+      if (doc.exists) {
+        return VideoCallModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 監聽通話狀態變化
+  static Stream<VideoCallModel?> watchCall(String callId) {
+    return _firestore
+        .collection(AppConstants.videoChatCollection)
+        .doc(callId)
+        .snapshots()
+        .map((snapshot) {
+      if (snapshot.exists) {
+        return VideoCallModel.fromFirestore(snapshot);
+      }
+      return null;
+    });
+  }
+
+  /// 監聽來電
+  static Stream<VideoCallModel?> listenForIncomingCalls(String userId) {
+    return _firestore
+        .collection(AppConstants.videoChatCollection)
+        .where('receiverId', isEqualTo: userId)
+        .where('status', isEqualTo: CallStatus.calling.toString())
+        .snapshots()
+        .map((snapshot) {
+      if (snapshot.docs.isNotEmpty) {
+        return VideoCallModel.fromFirestore(snapshot.docs.first);
+      }
+      return null;
+    });
+  }
+
+  /// 獲取用戶的通話歷史
+  static Future<List<VideoCallModel>> getCallHistory(String userId) async {
+    try {
+      final querySnapshot = await _firestore
+          .collection(AppConstants.videoChatCollection)
+          .where('status', isEqualTo: CallStatus.ended.toString())
+          .orderBy('createdAt', descending: true)
+          .limit(50)
+          .get();
+
+      return querySnapshot.docs
+          .map((doc) => VideoCallModel.fromFirestore(doc))
+          .where((call) => call.callerId == userId || call.receiverId == userId)
+          .toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /// 設置 Agora 引擎事件處理器
+  static void setAgoraEventHandlers({
+    Function(RtcConnection connection, int remoteUid, int elapsed)? onUserJoined,
+    Function(RtcConnection connection, int remoteUid, UserOfflineReasonType reason)? onUserOffline,
+    Function(RtcConnection connection, RtcStats stats)? onRtcStats,
+    Function(RtcConnection connection, ErrorCodeType err)? onError,
+  }) {
+    _engine?.registerEventHandler(
+      RtcEngineEventHandler(
+        onJoinChannelSuccess: (RtcConnection connection, int elapsed) {
+          if (AppConfig.enableDebugLogs) {
+            print('🎥 成功加入視頻通話頻道: ${connection.channelId}');
+          }
+        },
+        onUserJoined: onUserJoined,
+        onUserOffline: onUserOffline,
+        onRtcStats: onRtcStats,
+        onError: onError,
+        onConnectionStateChanged: (RtcConnection connection, 
+            ConnectionStateType state, ConnectionChangedReasonType reason) {
+          if (AppConfig.enableDebugLogs) {
+            print('🔗 連接狀態變化: $state, 原因: $reason');
+          }
+        },
+      ),
+    );
+  }
+
+  /// 發送通話通知
+  static Future<void> _sendCallNotification(VideoCallModel call) async {
+    // 這裡實現推送通知邏輯
+    // 需要獲取接收者的 FCM token 並發送通知
+    // 通知應該包含通話類型、發起者信息等
+  }
+
+  /// 生成 Agora Token
+  /// 注意：在生產環境中，這應該由後端服務生成
+  static Future<String?> generateAgoraToken({
+    required String channelName,
+    required int uid,
+    required int expireTime,
+  }) async {
+    // 這裡應該調用後端 API 生成 token
+    // 暫時返回 null，表示使用 App ID 進行測試
+    return null;
+  }
+
+  /// 釋放資源
+  static Future<void> dispose() async {
+    try {
+      await _callSubscription?.cancel();
+      await _engine?.leaveChannel();
+      await _engine?.release();
+      _engine = null;
+      
+      if (AppConfig.enableDebugLogs) {
+        print('🔌 視頻通話服務已清理');
+      }
+    } catch (e) {
+      // 忽略清理錯誤
+    }
+  }
+
+  /// 獲取 Agora 引擎實例
+  static RtcEngine? get engine => _engine;
+
+  /// 檢查是否支持視頻通話
+  static Future<bool> isVideoCallSupported() async {
+    try {
+      final cameraPermission = await Permission.camera.status;
+      final microphonePermission = await Permission.microphone.status;
+      
+      return cameraPermission.isGranted && microphonePermission.isGranted;
+    } catch (e) {
+      return false;
+    }
+  }
+} 

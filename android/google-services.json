@@ -1,0 +1,46 @@
+{
+  "project_info": {
+    "project_number": "380903609347",
+    "project_id": "amore-hk",
+    "storage_bucket": "amore-hk.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:380903609347:android:b24c6150c55e1fb260aa36",
+        "android_client_info": {
+          "package_name": "com.example.amore"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "380903609347-c9usc0ocm41edhok44un06sevk6r16t2.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCvL743BpjtCYCTm8P_Ci26A_5XcrI2yd8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "380903609347-c9usc0ocm41edhok44un06sevk6r16t2.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "380903609347-5ha9fohe9be4h3cpg5h24u71s3jkrb7e.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.amore"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

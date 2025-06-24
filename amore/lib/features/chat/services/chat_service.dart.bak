@@ -1,0 +1,590 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:uuid/uuid.dart';
+
+import '../../../core/services/firebase_service.dart';
+import '../../../core/models/chat_model.dart';
+import '../../../core/models/user_model.dart';
+import '../../../core/app_config.dart';
+
+/// 實時聊天服務
+class ChatService {
+  static FirebaseFirestore get _firestore => FirebaseService.firestore;
+  static FirebaseStorage get _storage => FirebaseService.storage;
+  static const _uuid = Uuid();
+
+  /// 創建或獲取對話
+  static Future<ConversationModel?> createOrGetConversation({
+    required String userId1,
+    required String userId2,
+    String? matchId,
+  }) async {
+    try {
+      final conversationId = _generateConversationId(userId1, userId2);
+      
+      // 檢查對話是否已存在
+      final existingConversation = await getConversation(conversationId);
+      if (existingConversation != null) {
+        return existingConversation;
+      }
+
+      // 創建新對話
+      final conversation = ConversationModel(
+        id: conversationId,
+        participants: [userId1, userId2],
+        type: ConversationType.match,
+        createdAt: DateTime.now(),
+        matchId: matchId,
+      );
+
+      await _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .set(conversation.toFirestore());
+
+      // 記錄事件
+      await FirebaseService.logEvent(
+        name: 'conversation_created',
+        parameters: {
+          'conversation_id': conversationId,
+          'participants': [userId1, userId2],
+          'match_id': matchId,
+        },
+      );
+
+      return conversation;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'createOrGetConversation',
+          'user_id_1': userId1,
+          'user_id_2': userId2,
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 獲取對話
+  static Future<ConversationModel?> getConversation(String conversationId) async {
+    try {
+      final doc = await _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .get();
+
+      if (doc.exists) {
+        return ConversationModel.fromFirestore(doc);
+      }
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 獲取用戶的對話列表
+  static Stream<List<ConversationModel>> getUserConversations(String userId) {
+    return _firestore
+        .collection(AppConstants.conversationsCollection)
+        .where('participants', arrayContains: userId)
+        .where('isActive', isEqualTo: true)
+        .orderBy('lastMessageTime', descending: true)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => ConversationModel.fromFirestore(doc))
+            .toList());
+  }
+
+  /// 發送文字消息
+  static Future<MessageModel?> sendTextMessage({
+    required String conversationId,
+    required String senderId,
+    required String content,
+    String? replyToMessageId,
+  }) async {
+    return _sendMessage(
+      conversationId: conversationId,
+      senderId: senderId,
+      content: content,
+      type: MessageType.text,
+      replyToMessageId: replyToMessageId,
+    );
+  }
+
+  /// 發送圖片消息
+  static Future<MessageModel?> sendImageMessage({
+    required String conversationId,
+    required String senderId,
+    required File imageFile,
+    String? caption,
+  }) async {
+    try {
+      // 上傳圖片到 Firebase Storage
+      final mediaUrl = await _uploadMedia(
+        file: imageFile,
+        conversationId: conversationId,
+        type: 'image',
+      );
+
+      if (mediaUrl == null) return null;
+
+      return _sendMessage(
+        conversationId: conversationId,
+        senderId: senderId,
+        content: caption ?? '',
+        type: MessageType.image,
+        mediaUrl: mediaUrl,
+      );
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'sendImageMessage',
+          'conversation_id': conversationId,
+          'sender_id': senderId,
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 發送語音消息
+  static Future<MessageModel?> sendAudioMessage({
+    required String conversationId,
+    required String senderId,
+    required File audioFile,
+    required Duration duration,
+  }) async {
+    try {
+      final mediaUrl = await _uploadMedia(
+        file: audioFile,
+        conversationId: conversationId,
+        type: 'audio',
+      );
+
+      if (mediaUrl == null) return null;
+
+      return _sendMessage(
+        conversationId: conversationId,
+        senderId: senderId,
+        content: '',
+        type: MessageType.audio,
+        mediaUrl: mediaUrl,
+        metadata: {'duration': duration.inMilliseconds},
+      );
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'sendAudioMessage',
+          'conversation_id': conversationId,
+          'sender_id': senderId,
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 獲取對話消息流
+  static Stream<List<MessageModel>> getMessages(String conversationId) {
+    return _firestore
+        .collection(AppConstants.conversationsCollection)
+        .doc(conversationId)
+        .collection(AppConstants.messagesCollection)
+        .orderBy('timestamp', descending: true)
+        .limit(50)
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => MessageModel.fromFirestore(doc))
+            .toList());
+  }
+
+  /// 獲取更多歷史消息
+  static Future<List<MessageModel>> getMoreMessages({
+    required String conversationId,
+    required DateTime before,
+    int limit = 20,
+  }) async {
+    try {
+      final querySnapshot = await _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .collection(AppConstants.messagesCollection)
+          .where('timestamp', isLessThan: Timestamp.fromDate(before))
+          .orderBy('timestamp', descending: true)
+          .limit(limit)
+          .get();
+
+      return querySnapshot.docs
+          .map((doc) => MessageModel.fromFirestore(doc))
+          .toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /// 標記消息為已讀
+  static Future<void> markMessagesAsRead({
+    required String conversationId,
+    required String userId,
+  }) async {
+    try {
+      final batch = _firestore.batch();
+
+      // 更新對話的最後閱讀時間
+      final conversationRef = _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId);
+
+      batch.update(conversationRef, {
+        'lastReadTimes.$userId': FieldValue.serverTimestamp(),
+        'unreadCounts.$userId': 0,
+      });
+
+      // 獲取未讀消息並標記為已讀
+      final unreadMessages = await _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .collection(AppConstants.messagesCollection)
+          .where('senderId', isNotEqualTo: userId)
+          .where('status', isNotEqualTo: MessageStatus.read.toString())
+          .get();
+
+      for (final doc in unreadMessages.docs) {
+        batch.update(doc.reference, {
+          'status': MessageStatus.read.toString(),
+        });
+      }
+
+      await batch.commit();
+
+      // 記錄事件
+      await FirebaseService.logEvent(
+        name: 'messages_read',
+        parameters: {
+          'conversation_id': conversationId,
+          'user_id': userId,
+          'message_count': unreadMessages.docs.length,
+        },
+      );
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'markMessagesAsRead',
+          'conversation_id': conversationId,
+          'user_id': userId,
+        },
+      );
+    }
+  }
+
+  /// 設置輸入狀態
+  static Future<void> setTypingStatus({
+    required String conversationId,
+    required String userId,
+    required bool isTyping,
+  }) async {
+    try {
+      final typingRef = _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .collection('typing')
+          .doc(userId);
+
+      if (isTyping) {
+        await typingRef.set({
+          'userId': userId,
+          'isTyping': true,
+          'timestamp': FieldValue.serverTimestamp(),
+        });
+      } else {
+        await typingRef.delete();
+      }
+    } catch (e) {
+      // 輸入狀態不是關鍵功能，失敗時不需要錯誤處理
+    }
+  }
+
+  /// 獲取輸入狀態流
+  static Stream<List<TypingStatus>> getTypingStatus(String conversationId) {
+    return _firestore
+        .collection(AppConstants.conversationsCollection)
+        .doc(conversationId)
+        .collection('typing')
+        .snapshots()
+        .map((snapshot) => snapshot.docs
+            .map((doc) => TypingStatus.fromJson({
+                  ...doc.data(),
+                  'timestamp': (doc.data()['timestamp'] as Timestamp?)
+                      ?.toDate()
+                      .toIso8601String(),
+                }))
+            .where((status) => DateTime.now()
+                    .difference(status.timestamp)
+                    .inSeconds <
+                5) // 5秒內的輸入狀態才有效
+            .toList());
+  }
+
+  /// 刪除消息
+  static Future<bool> deleteMessage({
+    required String conversationId,
+    required String messageId,
+    required String userId,
+  }) async {
+    try {
+      final messageRef = _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .collection(AppConstants.messagesCollection)
+          .doc(messageId);
+
+      final messageDoc = await messageRef.get();
+      if (!messageDoc.exists) return false;
+
+      final message = MessageModel.fromFirestore(messageDoc);
+      
+      // 只有消息發送者才能刪除消息
+      if (message.senderId != userId) return false;
+
+      await messageRef.delete();
+
+      // 如果是媒體消息，同時刪除存儲的文件
+      if (message.mediaUrl != null) {
+        try {
+          await _storage.refFromURL(message.mediaUrl!).delete();
+        } catch (e) {
+          // 文件可能已經不存在，忽略錯誤
+        }
+      }
+
+      await FirebaseService.logEvent(
+        name: 'message_deleted',
+        parameters: {
+          'conversation_id': conversationId,
+          'message_id': messageId,
+          'user_id': userId,
+        },
+      );
+
+      return true;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'deleteMessage',
+          'conversation_id': conversationId,
+          'message_id': messageId,
+          'user_id': userId,
+        },
+      );
+      return false;
+    }
+  }
+
+  /// 封鎖用戶
+  static Future<bool> blockUser({
+    required String userId,
+    required String blockedUserId,
+    required String conversationId,
+  }) async {
+    try {
+      // 添加到封鎖列表
+      await _firestore.collection(AppConstants.blocksCollection).add({
+        'userId': userId,
+        'blockedUserId': blockedUserId,
+        'timestamp': FieldValue.serverTimestamp(),
+        'reason': 'blocked_from_chat',
+      });
+
+      // 隱藏對話
+      await _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .update({
+        'isActive': false,
+      });
+
+      await FirebaseService.logEvent(
+        name: 'user_blocked',
+        parameters: {
+          'user_id': userId,
+          'blocked_user_id': blockedUserId,
+          'conversation_id': conversationId,
+        },
+      );
+
+      return true;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': 'blockUser',
+          'user_id': userId,
+          'blocked_user_id': blockedUserId,
+        },
+      );
+      return false;
+    }
+  }
+
+  /// 發送消息的內部方法
+  static Future<MessageModel?> _sendMessage({
+    required String conversationId,
+    required String senderId,
+    required String content,
+    required MessageType type,
+    String? mediaUrl,
+    String? replyToMessageId,
+    Map<String, dynamic>? metadata,
+  }) async {
+    try {
+      final messageId = _uuid.v4();
+      final now = DateTime.now();
+
+      final message = MessageModel(
+        id: messageId,
+        conversationId: conversationId,
+        senderId: senderId,
+        content: content,
+        type: type,
+        timestamp: now,
+        status: MessageStatus.sent,
+        mediaUrl: mediaUrl,
+        replyToMessageId: replyToMessageId,
+        metadata: metadata,
+      );
+
+      final batch = _firestore.batch();
+
+      // 添加消息
+      final messageRef = _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId)
+          .collection(AppConstants.messagesCollection)
+          .doc(messageId);
+
+      batch.set(messageRef, message.toFirestore());
+
+      // 更新對話信息
+      final conversationRef = _firestore
+          .collection(AppConstants.conversationsCollection)
+          .doc(conversationId);
+
+      final conversation = await getConversation(conversationId);
+      if (conversation != null) {
+        final otherParticipant = conversation.getOtherParticipant(senderId);
+        final currentUnreadCount = conversation.getUnreadCount(otherParticipant);
+
+        batch.update(conversationRef, {
+          'lastMessage': _getMessagePreview(content, type),
+          'lastMessageTime': FieldValue.serverTimestamp(),
+          'lastMessageSender': senderId,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'unreadCounts.$otherParticipant': currentUnreadCount + 1,
+        });
+      }
+
+      await batch.commit();
+
+      // 發送推送通知
+      await _sendMessageNotification(conversationId, senderId, content, type);
+
+      // 記錄事件
+      await FirebaseService.logEvent(
+        name: 'message_sent',
+        parameters: {
+          'conversation_id': conversationId,
+          'message_type': type.toString(),
+          'has_media': mediaUrl != null,
+        },
+      );
+
+      return message;
+    } catch (e, stackTrace) {
+      await FirebaseService.recordError(
+        exception: e,
+        stackTrace: stackTrace,
+        additionalData: {
+          'method': '_sendMessage',
+          'conversation_id': conversationId,
+          'sender_id': senderId,
+          'message_type': type.toString(),
+        },
+      );
+      return null;
+    }
+  }
+
+  /// 上傳媒體文件
+  static Future<String?> _uploadMedia({
+    required File file,
+    required String conversationId,
+    required String type,
+  }) async {
+    try {
+      final fileName = '${_uuid.v4()}.$type';
+      final path = 'conversations/$conversationId/media/$fileName';
+      
+      final ref = _storage.ref().child(path);
+      final uploadTask = ref.putFile(file);
+      
+      final snapshot = await uploadTask;
+      final downloadUrl = await snapshot.ref.getDownloadURL();
+      
+      return downloadUrl;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// 生成對話ID
+  static String _generateConversationId(String userId1, String userId2) {
+    final sortedIds = [userId1, userId2]..sort();
+    return '${sortedIds[0]}_${sortedIds[1]}';
+  }
+
+  /// 獲取消息預覽文字
+  static String _getMessagePreview(String content, MessageType type) {
+    switch (type) {
+      case MessageType.text:
+        return content.length > 50 ? '${content.substring(0, 50)}...' : content;
+      case MessageType.image:
+        return '📷 圖片';
+      case MessageType.audio:
+        return '🎵 語音消息';
+      case MessageType.video:
+        return '🎥 視頻';
+      case MessageType.file:
+        return '📎 文件';
+      case MessageType.location:
+        return '📍 位置';
+      case MessageType.sticker:
+        return '😊 貼圖';
+      case MessageType.system:
+        return content;
+    }
+  }
+
+  /// 發送消息推送通知
+  static Future<void> _sendMessageNotification(
+    String conversationId,
+    String senderId,
+    String content,
+    MessageType type,
+  ) async {
+    // 這裡實現推送通知邏輯
+    // 可以使用 Firebase Cloud Messaging
+    // 需要獲取接收者的 FCM token 並發送通知
+  }
+} 
